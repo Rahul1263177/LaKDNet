@@ -14,11 +14,13 @@ def to_4d(x,h,w):
 class BiasFree_LayerNorm(nn.Module):
     def __init__(self, normalized_shape):
         super(BiasFree_LayerNorm, self).__init__()
-        if isinstance(normalized_shape, numbers.Integral):
+        if isinstance(normalized_shape, numbers.Integral):#isinstance() checks the type of a variable.
+    #isinstance(normalized_shape, numbers.Integral)?This line checks if normalized_shape is just a plain number
+    #When creating a layer like BiasFree_LayerNorm, you pass in a number that tells the model how many features (channels) to normalize
             normalized_shape = (normalized_shape,)
         normalized_shape = torch.Size(normalized_shape)
 
-        assert len(normalized_shape) == 1
+        assert len(normalized_shape) == 1 #It checks that the length of normalized_shape is exactly 1.
 
         self.weight = nn.Parameter(torch.ones(normalized_shape))
         self.normalized_shape = normalized_shape
@@ -57,7 +59,9 @@ class LayerNorm(nn.Module):
     def forward(self, x):
         h, w = x.shape[-2:]
         return to_4d(self.body(to_3d(x)), h, w)
+#LayerNorm in PyTorch works best on 2D/3D tensors where the last dimension is the one being normalized.
 
+# But our input is 4D (b, c, h, w), so we need to temporarily flatten it → apply LayerNorm → restore original shape
 
 ####################################################
 class FeedForward(nn.Module):
@@ -74,6 +78,13 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         x = self.project_in(x)
+        """
+        Output shape remains the same: [B, 220, H, W]
+
+Then we split the channels into 2 parts along the channel axis:
+x1 = [B, 110, H, W]
+x2 = [B, 110, H, W]
+        """
         x1, x2 = self.dwconv(x).chunk(2, dim=1)
         x = F.gelu(x1) * x2
         x = self.project_out(x)
@@ -83,7 +94,7 @@ class FeedForward(nn.Module):
 #############################
 class Mixerlayer(nn.Module):
     def __init__(self, dim, mix_kernel_size, bias):
-        super(Mixerlayer, self).__init__()
+        super(Mixerlayer, self).__init__() #dim: number of input and output channels
 
         self.dense_depth_1 = nn.Conv2d(dim, dim, kernel_size=mix_kernel_size, stride=1, padding=mix_kernel_size//2, groups=dim, bias=bias)
         
@@ -116,8 +127,8 @@ class Mixerblock(nn.Module):
     def forward(self, x):
         
         x_src = x
-        z0 = self.norm1(x)
-        x = x + self.mixer(z0)
+        z0 = self.norm1(x) #Applies LayerNorm to input x and stores in z0 Helps remove any imbalance in feature distribution
+        x = x + self.mixer(z0)#You’re calling the Mixerlayer class's forward() method with input z0.
         x = x_src + self.ffn(self.norm2(x))
     
         return x
@@ -129,7 +140,7 @@ class Downsample(nn.Module):
 
         self.body = nn.Sequential(nn.Conv2d(n_feat, n_feat//2, kernel_size=3, stride=1, padding=1, bias=False),
                                   nn.PixelUnshuffle(2))
-
+#nn.PixelUnshuffle(2)-educes H, W → H/2, W/2 and it increases the channels 4* 
     def forward(self, x):
         return self.body(x)
 
@@ -149,23 +160,37 @@ class LaKDNet(nn.Module):
         inp_channels=3, 
         out_channels=3, 
         dim = 48,
-        num_blocks = [4,6,6,8], 
-        mix_kernel_size = [1,2,4,8],
+        num_blocks = [4,6,6,8], #number of mixer blocks at each level
+        mix_kernel_size = [1,2,4,8],#mixer layer kernel per size
         ffn_expansion_factor = 2.3,
         bias = False,
         LayerNorm_type = 'WithBias',  
-        dual_pixel_task = False        
+        dual_pixel_task = False    
+"""
+A Mixerblock is like a building block of the model.
+Inside it, you have:
+LayerNorm – makes training stable
+Mixerlayer – mixes spatial and channel information
+FeedForward – processes features and adds non-linearity
+"""
     ):
         super(LaKDNet, self).__init__()
 
         self.embed = nn.Conv2d(inp_channels, dim, kernel_size=3, stride=1, padding=1, bias=bias)
-
+         # converts [B, 3, H, W] into the [B, 48, H, W]
         self.encoder_level1 = nn.Sequential(*[Mixerblock(dim=dim, mix_kernel_size=mix_kernel_size[0], ffn_expansion_factor=ffn_expansion_factor, bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[0])])
-        
-        self.down1_2 = Downsample(dim) 
+                """
+Applies 4 Mixerblocks (because num_blocks[0] = 4)
+Each block mixes spatial and channel info
+Keeps resolution same
+"""
+        self.down1_2 = Downsample(dim) #[B, 48, H, W] → [B, 96, H/2, W/2]
         self.encoder_level2 = nn.Sequential(*[Mixerblock(dim=int(dim*2**1), mix_kernel_size=mix_kernel_size[1], ffn_expansion_factor=ffn_expansion_factor, bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[1])])
-        
-        self.down2_3 = Downsample(int(dim*2**1)) 
+"""
+dim*2^1 = 96 channels
+Uses 6 Mixerblocks (num_blocks[1] = 6
+Processes lower-res, higher-depth features"""
+        self.down2_3 = Downsample(int(dim*2**1)) #[B, 96, H/2, W/2] → [B, 192, H/4, W/4]
         self.encoder_level3 = nn.Sequential(*[Mixerblock(dim=int(dim*2**2), mix_kernel_size=mix_kernel_size[2], ffn_expansion_factor=ffn_expansion_factor, bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[2])])
 
         self.down3_4 = Downsample(int(dim*2**2)) 
